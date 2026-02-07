@@ -109,6 +109,26 @@ curl -s -X POST http://127.0.0.1:8000/api/fraud-readiness/simulate \
   }'
 ```
 
+### 7) Payout history
+
+Returns latest payout requests with risk decision and human review (if any). Optional query params: `limit` (default 50, max 200), `days` (default 7), `decision`, `user_id`.
+
+```bash
+curl -s "http://127.0.0.1:8000/api/payouts/history?limit=20&days=7"
+```
+
+---
+
+## Slack daily summary
+
+Set `SLACK_WEBHOOK_URL` in `.env` (Slack Incoming Webhook URL). Then run:
+
+```bash
+python manage.py send_daily_slack_summary
+```
+
+Posts the latest daily metrics (and calibration stats for that date if present) to the configured Slack channel. If `SLACK_WEBHOOK_URL` is not set, the command prints a message and exits without calling Slack.
+
 ---
 
 ## Demo flow (after seeding)

@@ -296,3 +296,117 @@ def test_seed_demo_data_command_runs():
     call_command("seed_demo_data", days=1, per_day=5, reviews=0.5)
     assert PayoutRequest.objects.count() >= initial_payouts + 5
     assert RiskDecision.objects.count() >= initial_decisions + 5
+
+
+@pytest.mark.django_db
+def test_payout_history_endpoint_returns_rows():
+    """GET /api/payouts/history returns rows with decision and human override fields."""
+    client = APIClient()
+    # Create 3 decisions; add 1 human review that overrides one of them
+    dec1 = client.post(
+        "/api/payouts/decision",
+        {
+            "user_id": "hist_user",
+            "amount": 100,
+            "currency": "USD",
+            "payment_method_id": "pm_1",
+            "payment_method_age_days": 20,
+            "country": "US",
+            "ip_address": "10.0.0.1",
+            "vpn_detected": False,
+            "total_trades": 10,
+            "total_trade_volume": 500,
+        },
+        format="json",
+    )
+    assert dec1.status_code == 200
+    risk_decision_id_1 = dec1.json()["risk_decision_id"]
+    client.post(
+        "/api/payouts/decision",
+        {
+            "user_id": "hist_user",
+            "amount": 200,
+            "currency": "USD",
+            "payment_method_id": "pm_2",
+            "payment_method_age_days": 20,
+            "country": "US",
+            "ip_address": "10.0.0.1",
+            "vpn_detected": False,
+            "total_trades": 10,
+            "total_trade_volume": 1000,
+        },
+        format="json",
+    )
+    client.post(
+        "/api/payouts/decision",
+        {
+            "user_id": "other_user",
+            "amount": 50,
+            "currency": "USD",
+            "payment_method_id": "pm_3",
+            "payment_method_age_days": 20,
+            "country": "US",
+            "ip_address": "10.0.0.1",
+            "vpn_detected": False,
+            "total_trades": 10,
+            "total_trade_volume": 200,
+        },
+        format="json",
+    )
+    # Add human review that overrides (e.g. system approved, human blocks)
+    rev = client.post(
+        "/api/reviews",
+        {
+            "risk_decision_id": risk_decision_id_1,
+            "reviewer_id": "r1",
+            "final_decision": "block",
+        },
+        format="json",
+    )
+    assert rev.status_code == 201
+
+    response = client.get("/api/payouts/history?days=7&limit=10")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    assert len(data) >= 3
+    for row in data:
+        assert "payout_request_id" in row
+        assert "risk_decision_id" in row
+        assert "created_at" in row
+        assert "user_id" in row
+        assert "amount" in row
+        assert "currency" in row
+        assert "decision" in row
+        assert "risk_score" in row
+        assert "confidence_score" in row
+        assert "regret_level" in row
+        assert "triggered_signals" in row
+        assert "reasons" in row
+        assert "counterfactuals" in row
+        assert "human_final_decision" in row
+        assert "human_reviewed_at" in row
+        assert "human_overrode" in row
+    # Find the row that got the human review (override)
+    overridden = [r for r in data if r["human_final_decision"] == "block" and r["human_overrode"]]
+    assert len(overridden) >= 1
+
+
+@pytest.mark.django_db
+def test_send_daily_slack_summary_command_without_webhook():
+    """send_daily_slack_summary exits cleanly when SLACK_WEBHOOK_URL is not set."""
+    from django.core.management import call_command
+    from io import StringIO
+
+    out = StringIO()
+    # Ensure webhook is not set (e.g. in test env it might be unset)
+    import os
+    orig = os.environ.pop("SLACK_WEBHOOK_URL", None)
+    try:
+        call_command("send_daily_slack_summary", stdout=out)
+        out.seek(0)
+        text = out.read()
+        assert "SLACK_WEBHOOK_URL" in text or "not set" in text.lower()
+    finally:
+        if orig is not None:
+            os.environ["SLACK_WEBHOOK_URL"] = orig

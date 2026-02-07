@@ -69,3 +69,24 @@ class FraudReadinessSimulateSerializer(serializers.Serializer):
         required=False,
         allow_null=True,
     )
+
+
+class PayoutHistoryRowSerializer(serializers.Serializer):
+    """Output shape for GET /api/payouts/history rows."""
+
+    payout_request_id = serializers.UUIDField()
+    risk_decision_id = serializers.UUIDField()
+    created_at = serializers.DateTimeField()
+    user_id = serializers.CharField()
+    amount = serializers.DecimalField(max_digits=20, decimal_places=2)
+    currency = serializers.CharField()
+    decision = serializers.CharField()
+    risk_score = serializers.IntegerField()
+    confidence_score = serializers.IntegerField()
+    regret_level = serializers.CharField()
+    triggered_signals = serializers.ListField(child=serializers.CharField())
+    reasons = serializers.ListField(child=serializers.CharField())
+    counterfactuals = serializers.ListField(child=serializers.CharField())
+    human_final_decision = serializers.CharField(allow_null=True)
+    human_reviewed_at = serializers.DateTimeField(allow_null=True)
+    human_overrode = serializers.BooleanField()

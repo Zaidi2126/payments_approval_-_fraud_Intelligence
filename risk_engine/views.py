@@ -5,6 +5,7 @@ risk trajectory, fraud readiness simulation.
 
 from django.utils import timezone
 from datetime import timedelta
+from django.db.models import Prefetch
 
 from rest_framework import status
 from rest_framework.views import APIView
@@ -22,6 +23,7 @@ from .serializers import (
     PayoutDecisionRequestSerializer,
     HumanReviewRequestSerializer,
     FraudReadinessSimulateSerializer,
+    PayoutHistoryRowSerializer,
 )
 from .engine import run_engine, EngineInput
 from .fraud_readiness import (
@@ -147,6 +149,77 @@ class PayoutDecisionView(APIView):
             "confidence_and_regret_index": build_confidence_and_regret_index(result),
         }
         return Response(response_payload, status=status.HTTP_200_OK)
+
+
+class PayoutHistoryView(APIView):
+    """
+    GET /api/payouts/history
+    Return payout requests with RiskDecision and latest HumanReview (if any).
+    Excludes payouts without a RiskDecision.
+    """
+
+    def get(self, request):
+        try:
+            limit = min(200, max(1, int(request.query_params.get("limit", 50))))
+        except (TypeError, ValueError):
+            limit = 50
+        try:
+            days = min(365, max(1, int(request.query_params.get("days", 7))))
+        except (TypeError, ValueError):
+            days = 7
+        decision_filter = request.query_params.get("decision")
+        user_id_filter = request.query_params.get("user_id")
+        since = timezone.now() - timedelta(days=days)
+
+        qs = (
+            RiskDecision.objects.filter(created_at__gte=since)
+            .select_related("payout_request")
+            .prefetch_related(
+                Prefetch(
+                    "human_reviews",
+                    queryset=HumanReview.objects.order_by("-reviewed_at"),
+                )
+            )
+            .order_by("-created_at")
+        )
+        if decision_filter and decision_filter in ("approve", "review", "block"):
+            qs = qs.filter(decision=decision_filter)
+        if user_id_filter:
+            qs = qs.filter(payout_request__user_id=user_id_filter)
+
+        decisions = list(qs[:limit])
+        rows = []
+        for rd in decisions:
+            payout = rd.payout_request
+            latest_review = list(rd.human_reviews.all())[:1]
+            latest_review = latest_review[0] if latest_review else None
+            human_final_decision = latest_review.final_decision if latest_review else None
+            human_reviewed_at = latest_review.reviewed_at if latest_review else None
+            human_overrode = bool(
+                latest_review and latest_review.final_decision != rd.decision
+            )
+            rows.append(
+                {
+                    "payout_request_id": payout.id,
+                    "risk_decision_id": rd.id,
+                    "created_at": rd.created_at,
+                    "user_id": payout.user_id,
+                    "amount": payout.amount,
+                    "currency": payout.currency,
+                    "decision": rd.decision,
+                    "risk_score": rd.risk_score,
+                    "confidence_score": rd.confidence_score,
+                    "regret_level": rd.regret_level,
+                    "triggered_signals": rd.triggered_signals,
+                    "reasons": rd.reasons,
+                    "counterfactuals": rd.counterfactuals,
+                    "human_final_decision": human_final_decision,
+                    "human_reviewed_at": human_reviewed_at,
+                    "human_overrode": human_overrode,
+                }
+            )
+        serializer = PayoutHistoryRowSerializer(rows, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class HumanReviewCreateView(APIView):
