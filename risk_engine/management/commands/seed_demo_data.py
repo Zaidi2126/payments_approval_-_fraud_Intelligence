@@ -13,7 +13,7 @@ After seeding, you can check:
   - Approve (low regret):  user_approve_low (amount 100), user_approve_medium (500)
   - Review:                 user_review_velocity (velocity_abuse), user_review_two_signals (40)
   - Block:                 user_block_multi (no_trade+velocity+geo), user_pattern_* (each pattern)
-  - Risk trajectory:       GET .../api/users/traj_user/risk-trajectory?days=7
+  - Risk trajectory:       GET .../api/users/traj_user/risk-trajectory?days=7  or .../api/users/demo_user_1/risk-trajectory?days=7
   - NL query:              POST .../api/query {"question": "accounts that traded minimally"} -> minimal_trader
   - Fraud network:         GET .../api/fraud-network?user_id=network_user_pm_0 (pm_shared_1), network_user_dev_* (dev_shared_1)
   - Emerging patterns:     GET .../api/patterns/emerging?days=7 (geo_vpn, velocity combos)
@@ -207,6 +207,13 @@ class Command(BaseCommand):
             amount = [100, 150, 200, 100][i]
             dec = _base("traj_user", amount, total_trades=5 + i, total_trade_volume=1000 + 500 * i)
             _create_payout_and_decision(dec, _make_ts(i))
+            created += 1
+
+        # --- 8b) demo_user_1: 15 payouts for a rich Risk Trajectory demo (frontend often uses this id) ---
+        amounts = [80, 150.50, 220, 120, 300, 95, 410, 180, 250, 110, 320, 200, 140, 380, 160]
+        for i in range(15):
+            dec = _base("demo_user_1", amounts[i], total_trades=3 + i, total_trade_volume=800 + 400 * i)
+            _create_payout_and_decision(dec, _make_ts(min(i, 13)))  # spread over ~14 days so all in 30-day window
             created += 1
 
         # --- 9) NL query "traded minimally / deposited but traded little": low trades, low volume, approved ---
