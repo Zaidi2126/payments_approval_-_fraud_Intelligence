@@ -1,7 +1,7 @@
 """
-Explainability: reasons and counterfactuals per triggered signal.
+Explainability: deterministic fallback for reasons and counterfactuals per triggered signal.
 
-Pure functions; no LLM calls.
+Used when OPENAI_API_KEY is missing or the LLM call fails. Default path is LLM (risk_engine.llm.client).
 """
 
 from .detectors import (

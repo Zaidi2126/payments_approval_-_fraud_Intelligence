@@ -121,13 +121,18 @@ curl -s "http://127.0.0.1:8000/api/payouts/history?limit=20&days=7"
 
 ## Slack daily summary
 
-Set `SLACK_WEBHOOK_URL` in `.env` (Slack Incoming Webhook URL). Then run:
+1. **Create or edit `.env`** in the project root (see `.env.example` for a template).
+2. **Add your Slack Incoming Webhook URL:**
+   ```
+   SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+   ```
+   (Create the webhook in Slack: Apps → Incoming Webhooks → Add to Slack, then copy the URL.)
+3. **Run the command:**
+   ```bash
+   python manage.py send_daily_slack_summary
+   ```
 
-```bash
-python manage.py send_daily_slack_summary
-```
-
-Posts the latest daily metrics (and calibration stats for that date if present) to the configured Slack channel. If `SLACK_WEBHOOK_URL` is not set, the command prints a message and exits without calling Slack.
+This posts the latest daily metrics (and calibration stats for that date if present) to the configured Slack channel. If `SLACK_WEBHOOK_URL` is not set, the command prints a message and exits without calling Slack.
 
 ---
 

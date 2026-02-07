@@ -1,15 +1,20 @@
 """
 API views for risk_engine: health, payout decision, human review, daily metrics,
-risk trajectory, fraud readiness simulation.
+risk trajectory, fraud readiness simulation, send daily report.
 """
+
+import os
 
 from django.utils import timezone
 from datetime import timedelta
 from django.db.models import Prefetch
+from dotenv import load_dotenv
 
 from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
+
+load_dotenv()
 
 from .models import (
     PayoutRequest,
@@ -281,6 +286,94 @@ class DailyMetricsListView(APIView):
             for m in metrics
         ]
         return Response(payload, status=status.HTTP_200_OK)
+
+
+class SendDailyReportView(APIView):
+    """
+    POST /api/reports/send-daily-summary
+    Sends today's (latest) daily metrics + calibration to Slack.
+    Frontend sends slack_webhook_url in the request body; that URL is used for this request only.
+    """
+
+    def post(self, request):
+        # Webhook from request body (FE provides it); fallback to env for CLI/backward compatibility
+        webhook_url = None
+        if request.data and isinstance(request.data, dict):
+            webhook_url = (request.data.get("slack_webhook_url") or "").strip()
+        if not webhook_url:
+            webhook_url = (os.getenv("SLACK_WEBHOOK_URL") or "").strip()
+        if not webhook_url:
+            return Response(
+                {
+                    "success": False,
+                    "error": "slack_webhook_url is required. Send it in the request body: { \"slack_webhook_url\": \"https://hooks.slack.com/...\" }",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        latest = DailyMetrics.objects.order_by("-date").first()
+        if not latest:
+            return Response(
+                {
+                    "success": False,
+                    "error": "No daily metrics found. Run recompute_daily_metrics or seed_demo_data first.",
+                },
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        calibration = CalibrationStats.objects.filter(date=latest.date).first()
+        report = {
+            "date": latest.date.isoformat(),
+            "total_requests": latest.total_requests,
+            "auto_approved": latest.auto_approved,
+            "auto_blocked": latest.auto_blocked,
+            "sent_to_review": latest.sent_to_review,
+        }
+        if calibration:
+            report["accuracy_percent"] = calibration.accuracy_percent
+            report["overconfidence_rate"] = calibration.overconfidence_rate
+            report["underconfidence_rate"] = calibration.underconfidence_rate
+
+        slack_fields = [
+            {"title": "Date", "value": report["date"], "short": True},
+            {"title": "Total requests", "value": str(report["total_requests"]), "short": True},
+            {"title": "Auto approved", "value": str(report["auto_approved"]), "short": True},
+            {"title": "Auto blocked", "value": str(report["auto_blocked"]), "short": True},
+            {"title": "Sent to review", "value": str(report["sent_to_review"]), "short": True},
+        ]
+        if calibration:
+            slack_fields.append({"title": "Accuracy %", "value": f"{calibration.accuracy_percent}", "short": True})
+            slack_fields.append({"title": "Overconfidence rate %", "value": f"{calibration.overconfidence_rate}", "short": True})
+            slack_fields.append({"title": "Underconfidence rate %", "value": f"{calibration.underconfidence_rate}", "short": True})
+
+        slack_payload = {
+            "attachments": [
+                {
+                    "title": "Daily Payouts Summary",
+                    "fields": slack_fields,
+                    "color": "#36a64f",
+                }
+            ]
+        }
+
+        try:
+            import requests
+            resp = requests.post(webhook_url, json=slack_payload, timeout=10)
+            resp.raise_for_status()
+        except Exception as e:
+            return Response(
+                {"success": False, "error": f"Failed to send to Slack: {str(e)}", "report": report},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response(
+            {
+                "success": True,
+                "message": "Daily report sent to Slack.",
+                "report": report,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class CalibrationStatsListView(APIView):

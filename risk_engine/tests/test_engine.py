@@ -208,7 +208,7 @@ def test_get_regret_level():
 
 
 def test_reasons_and_counterfactuals_per_signal():
-    """Reasons and counterfactuals are generated for each triggered signal."""
+    """Reasons and counterfactuals are generated for each triggered signal (LLM or fallback)."""
     inp = _base_input(
         total_trades=1,
         total_trade_volume=Decimal("0"),
@@ -220,3 +220,47 @@ def test_reasons_and_counterfactuals_per_signal():
     assert len(result.counterfactuals) == len(result.triggered_signals)
     assert "no_trade_fraud" in result.triggered_signals
     assert "geo_vpn_anomaly" in result.triggered_signals
+
+
+# ----- LLM and fallback explanations (no network) -----
+
+
+def test_llm_explanations_used_when_mocked(monkeypatch):
+    """When generate_explanations is mocked, reasons and counterfactuals come from the mock (no network)."""
+    from risk_engine import llm
+    mock_reasons = ["LLM-generated reason for signal."]
+    mock_counterfactuals = ["LLM-generated counterfactual suggestion."]
+
+    def mock_generate(payload):
+        return {"reasons": mock_reasons, "counterfactuals": mock_counterfactuals}
+
+    monkeypatch.setattr(llm.client, "generate_explanations", mock_generate)
+    inp = _base_input(total_trades=1, total_trade_volume=Decimal("0"), payment_method_age_days=0)
+    result = run_engine(inp)
+    assert result.reasons == mock_reasons
+    assert result.counterfactuals == mock_counterfactuals
+    assert "no_trade_fraud" in result.triggered_signals
+
+
+def test_fallback_explanations_when_no_api_key(monkeypatch):
+    """When OPENAI_API_KEY is missing, fallback reasons and counterfactuals are returned and are non-empty."""
+    from risk_engine import llm
+    # Force fallback path by making generate_explanations use fallback (no API call)
+    from risk_engine.llm.client import _fallback_explanations
+
+    def mock_generate(payload):
+        return _fallback_explanations(payload)
+
+    monkeypatch.setattr(llm.client, "generate_explanations", mock_generate)
+    inp = _base_input(
+        total_trades=1,
+        total_trade_volume=Decimal("0"),
+        payment_method_age_days=1,
+        vpn_detected=True,
+    )
+    result = run_engine(inp)
+    assert len(result.triggered_signals) >= 2
+    assert len(result.reasons) == len(result.triggered_signals)
+    assert len(result.counterfactuals) == len(result.triggered_signals)
+    assert all(isinstance(r, str) and len(r) > 0 for r in result.reasons)
+    assert all(isinstance(c, str) and len(c) > 0 for c in result.counterfactuals)
