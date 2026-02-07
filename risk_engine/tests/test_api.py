@@ -284,3 +284,15 @@ def test_calibration_endpoint_returns_rows():
         assert "avg_confidence_incorrect" in row
         assert "overconfidence_rate" in row
         assert "underconfidence_rate" in row
+
+
+@pytest.mark.django_db
+def test_seed_demo_data_command_runs():
+    """seed_demo_data command creates PayoutRequest and RiskDecision rows."""
+    from django.core.management import call_command
+
+    initial_payouts = PayoutRequest.objects.count()
+    initial_decisions = RiskDecision.objects.count()
+    call_command("seed_demo_data", days=1, per_day=5, reviews=0.5)
+    assert PayoutRequest.objects.count() >= initial_payouts + 5
+    assert RiskDecision.objects.count() >= initial_decisions + 5
