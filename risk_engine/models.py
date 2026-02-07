@@ -114,3 +114,31 @@ class FraudReadinessSnapshot(models.Model):
 
     def __str__(self):
         return f"FraudReadinessSnapshot {self.id} ({self.simulated_pattern}, {self.readiness_level})"
+
+
+class CalibrationStats(models.Model):
+    """
+    Per-date calibration stats from HumanReview outcomes.
+    Only approve/block system decisions are counted for correctness.
+    """
+
+    date = models.DateField(unique=True)
+    reviewed_count = models.IntegerField(default=0)
+    correct_count = models.IntegerField(default=0)
+    incorrect_count = models.IntegerField(default=0)
+    accuracy_percent = models.FloatField(default=0.0)
+    avg_confidence_correct = models.FloatField(default=0.0)
+    avg_confidence_incorrect = models.FloatField(default=0.0)
+    overconfidence_rate = models.FloatField(
+        default=0.0
+    )  # % of incorrect where confidence_score >= 80
+    underconfidence_rate = models.FloatField(
+        default=0.0
+    )  # % of correct where confidence_score < 50
+
+    class Meta:
+        ordering = ["-date"]
+        verbose_name_plural = "Calibration stats"
+
+    def __str__(self):
+        return f"CalibrationStats {self.date} (accuracy={self.accuracy_percent}%)"

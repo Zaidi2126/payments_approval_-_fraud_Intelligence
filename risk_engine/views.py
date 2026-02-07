@@ -10,7 +10,14 @@ from rest_framework import status
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
-from .models import PayoutRequest, RiskDecision, HumanReview, DailyMetrics, FraudReadinessSnapshot
+from .models import (
+    PayoutRequest,
+    RiskDecision,
+    HumanReview,
+    DailyMetrics,
+    FraudReadinessSnapshot,
+    CalibrationStats,
+)
 from .serializers import (
     PayoutDecisionRequestSerializer,
     HumanReviewRequestSerializer,
@@ -22,6 +29,46 @@ from .fraud_readiness import (
     build_scenario_input,
     readiness_level_from_score,
 )
+
+
+def _confidence_band(confidence_score: int) -> str:
+    """low < 50, medium 50-79, high >= 80."""
+    if confidence_score < 50:
+        return "low"
+    if confidence_score <= 79:
+        return "medium"
+    return "high"
+
+
+def _recommended_next_step(decision: str) -> str:
+    """approve -> auto_process, review -> human_review, block -> block_and_investigate."""
+    return {"approve": "auto_process", "review": "human_review", "block": "block_and_investigate"}[
+        decision
+    ]
+
+
+def _action_rationale(risk_score: int, confidence_score: int, triggered_signals: list) -> str:
+    """Deterministic sentence referencing risk_score, confidence_score, and signal count."""
+    n = len(triggered_signals)
+    return (
+        f"Risk score {risk_score} with confidence {confidence_score} "
+        f"and {n} triggered signal{'s' if n != 1 else ''}."
+    )
+
+
+def build_confidence_and_regret_index(result) -> dict:
+    """Build the confidence_and_regret_index object for decision response."""
+    return {
+        "confidence_score": result.confidence_score,
+        "regret_level": result.regret_level,
+        "risk_score": result.risk_score,
+        "decision": result.decision,
+        "confidence_band": _confidence_band(result.confidence_score),
+        "action_rationale": _action_rationale(
+            result.risk_score, result.confidence_score, result.triggered_signals
+        ),
+        "recommended_next_step": _recommended_next_step(result.decision),
+    }
 
 
 class HealthView(APIView):
@@ -97,6 +144,7 @@ class PayoutDecisionView(APIView):
             "reasons": result.reasons,
             "counterfactuals": result.counterfactuals,
             "created_at": risk_decision.created_at.isoformat(),
+            "confidence_and_regret_index": build_confidence_and_regret_index(result),
         }
         return Response(response_payload, status=status.HTTP_200_OK)
 
@@ -158,6 +206,31 @@ class DailyMetricsListView(APIView):
                 "false_negative_rate": m.false_negative_rate,
             }
             for m in metrics
+        ]
+        return Response(payload, status=status.HTTP_200_OK)
+
+
+class CalibrationStatsListView(APIView):
+    """
+    GET /api/metrics/calibration
+    Return CalibrationStats rows ordered by date descending.
+    """
+
+    def get(self, request):
+        stats = CalibrationStats.objects.all().order_by("-date")
+        payload = [
+            {
+                "date": s.date.isoformat(),
+                "reviewed_count": s.reviewed_count,
+                "correct_count": s.correct_count,
+                "incorrect_count": s.incorrect_count,
+                "accuracy_percent": s.accuracy_percent,
+                "avg_confidence_correct": s.avg_confidence_correct,
+                "avg_confidence_incorrect": s.avg_confidence_incorrect,
+                "overconfidence_rate": s.overconfidence_rate,
+                "underconfidence_rate": s.underconfidence_rate,
+            }
+            for s in stats
         ]
         return Response(payload, status=status.HTTP_200_OK)
 

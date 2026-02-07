@@ -5,7 +5,13 @@ API tests for payout decision, human review, metrics, risk trajectory, fraud rea
 import pytest
 from rest_framework.test import APIClient
 
-from risk_engine.models import PayoutRequest, RiskDecision, HumanReview, FraudReadinessSnapshot
+from risk_engine.models import (
+    PayoutRequest,
+    RiskDecision,
+    HumanReview,
+    FraudReadinessSnapshot,
+    CalibrationStats,
+)
 
 
 @pytest.mark.django_db
@@ -45,6 +51,48 @@ def test_decision_endpoint_creates_rows():
     assert str(rd.payout_request_id) == data["payout_request_id"]
     assert rd.decision == data["decision"]
     assert rd.risk_score == data["risk_score"]
+
+
+@pytest.mark.django_db
+def test_decision_response_includes_confidence_and_regret_index():
+    """POST /api/payouts/decision response includes confidence_and_regret_index with all required fields."""
+    client = APIClient()
+    payload = {
+        "user_id": "idx_user",
+        "amount": 100,
+        "currency": "USD",
+        "payment_method_id": "pm_1",
+        "payment_method_age_days": 10,
+        "country": "US",
+        "ip_address": "192.168.1.1",
+        "vpn_detected": False,
+        "total_trades": 5,
+        "total_trade_volume": 500,
+    }
+    response = client.post("/api/payouts/decision", payload, format="json")
+    assert response.status_code == 200
+    data = response.json()
+    assert "confidence_and_regret_index" in data
+    idx = data["confidence_and_regret_index"]
+    assert "confidence_score" in idx
+    assert "regret_level" in idx
+    assert idx["regret_level"] in ("low", "medium", "high")
+    assert "risk_score" in idx
+    assert "decision" in idx
+    assert "confidence_band" in idx
+    assert idx["confidence_band"] in ("low", "medium", "high")
+    assert "action_rationale" in idx
+    assert isinstance(idx["action_rationale"], str)
+    assert "recommended_next_step" in idx
+    assert idx["recommended_next_step"] in ("auto_process", "human_review", "block_and_investigate")
+    # Mapping: approve -> auto_process, review -> human_review, block -> block_and_investigate
+    assert idx["decision"] == data["decision"]
+    if data["decision"] == "approve":
+        assert idx["recommended_next_step"] == "auto_process"
+    elif data["decision"] == "review":
+        assert idx["recommended_next_step"] == "human_review"
+    else:
+        assert idx["recommended_next_step"] == "block_and_investigate"
 
 
 @pytest.mark.django_db
@@ -172,3 +220,67 @@ def test_fraud_readiness_simulation_creates_snapshots():
     assert resp2.status_code == 200
     assert len(resp2.json()["results"]) == 2
     assert FraudReadinessSnapshot.objects.count() == initial_count + 5 + 2
+
+
+@pytest.mark.django_db
+def test_recompute_calibration_stats_command_creates_rows():
+    """recompute_calibration_stats command creates/upserts CalibrationStats from HumanReview data."""
+    from django.core.management import call_command
+
+    client = APIClient()
+    # Create a decision (approve) and a human review (approve) -> correct
+    dec = client.post(
+        "/api/payouts/decision",
+        {
+            "user_id": "cal_user",
+            "amount": 50,
+            "currency": "USD",
+            "payment_method_id": "pm_1",
+            "payment_method_age_days": 20,
+            "country": "US",
+            "ip_address": "10.0.0.1",
+            "vpn_detected": False,
+            "total_trades": 10,
+            "total_trade_volume": 500,
+        },
+        format="json",
+    )
+    assert dec.status_code == 200
+    risk_decision_id = dec.json()["risk_decision_id"]
+    rev = client.post(
+        "/api/reviews",
+        {"risk_decision_id": risk_decision_id, "reviewer_id": "r1", "final_decision": "approve"},
+        format="json",
+    )
+    assert rev.status_code == 201
+
+    initial_count = CalibrationStats.objects.count()
+    call_command("recompute_calibration_stats")
+    assert CalibrationStats.objects.count() >= initial_count + 1
+    latest = CalibrationStats.objects.order_by("-date").first()
+    assert latest.reviewed_count >= 1
+    assert latest.correct_count >= 1
+    assert latest.accuracy_percent >= 0
+
+
+@pytest.mark.django_db
+def test_calibration_endpoint_returns_rows():
+    """GET /api/metrics/calibration returns calibration stats ordered by date desc."""
+    from django.core.management import call_command
+
+    call_command("recompute_calibration_stats")
+    client = APIClient()
+    response = client.get("/api/metrics/calibration")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list)
+    for row in data:
+        assert "date" in row
+        assert "reviewed_count" in row
+        assert "correct_count" in row
+        assert "incorrect_count" in row
+        assert "accuracy_percent" in row
+        assert "avg_confidence_correct" in row
+        assert "avg_confidence_incorrect" in row
+        assert "overconfidence_rate" in row
+        assert "underconfidence_rate" in row

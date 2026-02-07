@@ -5,6 +5,7 @@ from .models import (
     HumanReview,
     DailyMetrics,
     FraudReadinessSnapshot,
+    CalibrationStats,
 )
 
 
@@ -46,3 +47,18 @@ class FraudReadinessSnapshotAdmin(admin.ModelAdmin):
     list_display = ("id", "simulated_pattern", "simulated_risk_score", "readiness_level", "created_at")
     list_filter = ("readiness_level", "simulated_pattern")
     readonly_fields = ("id", "created_at")
+
+
+@admin.register(CalibrationStats)
+class CalibrationStatsAdmin(admin.ModelAdmin):
+    list_display = (
+        "date",
+        "reviewed_count",
+        "correct_count",
+        "incorrect_count",
+        "accuracy_percent",
+        "overconfidence_rate",
+        "underconfidence_rate",
+    )
+    list_filter = ("date",)
+    ordering = ("-date",)
