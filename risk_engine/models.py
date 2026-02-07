@@ -15,6 +15,10 @@ class PayoutRequest(models.Model):
     vpn_detected = models.BooleanField(default=False)
     total_trades = models.IntegerField(default=0)
     total_trade_volume = models.DecimalField(max_digits=20, decimal_places=2, default=Decimal("0"))
+    # Optional technical fraud signals (for detectors)
+    card_decline_count_24h = models.IntegerField(null=True, blank=True, default=None)
+    failed_login_count_24h = models.IntegerField(null=True, blank=True, default=None)
+    device_id = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -48,6 +52,10 @@ class RiskDecision(models.Model):
     triggered_signals = models.JSONField(default=list)  # list of strings
     reasons = models.JSONField(default=list)  # list of strings
     counterfactuals = models.JSONField(default=list)  # list of strings
+    review_explanation = models.TextField(
+        blank=True,
+        help_text="LLM-generated: why this was sent for review (filled on first request when decision=review).",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -70,7 +78,16 @@ class HumanReview(models.Model):
     )
     reviewer_id = models.CharField(max_length=255)
     final_decision = models.CharField(max_length=10, choices=FinalDecision.choices)
+    note = models.TextField(blank=True, help_text="Optional note from the reviewer when overturning.")
     reviewed_at = models.DateTimeField(auto_now_add=True)
+    system_explanation = models.TextField(
+        blank=True,
+        help_text="LLM-generated: why the system made its decision (filled on first admin view).",
+    )
+    approved_for_learning = models.BooleanField(
+        default=False,
+        help_text="Admin approved this override so signal weights can be tuned from it.",
+    )
 
     class Meta:
         ordering = ["-reviewed_at"]
@@ -142,3 +159,65 @@ class CalibrationStats(models.Model):
 
     def __str__(self):
         return f"CalibrationStats {self.date} (accuracy={self.accuracy_percent}%)"
+
+
+class EngineConfig(models.Model):
+    """
+    Key-value store for engine parameters (e.g. signal_weights).
+    Enables admin to view and tune weights; engine reads from here when present.
+    """
+
+    key = models.CharField(max_length=64, unique=True)
+    value = models.JSONField(default=dict)
+
+    class Meta:
+        verbose_name_plural = "Engine config"
+
+    def __str__(self):
+        return f"EngineConfig {self.key}"
+
+
+class SystemScore(models.Model):
+    """
+    Singleton: one row. Tracks how well the system is doing.
+    +points when a user accepts a system decision; -points when user conflicts and admin approves for learning.
+    """
+
+    score = models.IntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name_plural = "System scores"
+
+    def __str__(self):
+        return f"SystemScore {self.score}"
+
+
+class AccountFlag(models.Model):
+    """User flagged for fraud/incident (e.g. bulk lock). Engine can force review/block for flagged users."""
+
+    user_id = models.CharField(max_length=255, db_index=True)
+    reason = models.CharField(max_length=512)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"AccountFlag {self.user_id}"
+
+
+class EmergingPattern(models.Model):
+    """Discovered pattern: recurring signal combo in blocked/reviewed decisions. LLM describes it."""
+
+    signal_combo = models.CharField(max_length=256)  # e.g. "velocity_abuse,geo_vpn_anomaly"
+    case_count = models.IntegerField(default=0)
+    first_seen = models.DateTimeField(auto_now_add=True)
+    last_seen = models.DateTimeField(auto_now=True)
+    description = models.TextField(blank=True)  # LLM-generated
+
+    class Meta:
+        ordering = ["-last_seen"]
+
+    def __str__(self):
+        return f"EmergingPattern {self.signal_combo} (n={self.case_count})"

@@ -101,6 +101,46 @@ def geo_vpn_anomaly(input: EngineInput) -> str | None:
     return None
 
 
+# card_decline_risk: recent card errors
+CARD_DECLINE_THRESHOLD = 2
+
+
+def card_decline_risk(input: EngineInput) -> str | None:
+    """Trigger when card decline count in last 24h is high."""
+    if input.card_decline_count_24h is not None and input.card_decline_count_24h >= CARD_DECLINE_THRESHOLD:
+        return "card_decline_risk"
+    return None
+
+
+# failed_login_risk: account takeover / credential stuffing
+FAILED_LOGIN_THRESHOLD = 3
+
+
+def failed_login_risk(input: EngineInput) -> str | None:
+    """Trigger when failed login count in last 24h is high."""
+    if input.failed_login_count_24h is not None and input.failed_login_count_24h >= FAILED_LOGIN_THRESHOLD:
+        return "failed_login_risk"
+    return None
+
+
+# device_shared_risk: same device used for many accounts (fraud ring)
+DEVICE_SHARED_THRESHOLD = 3
+
+
+def device_shared_risk(input: EngineInput) -> str | None:
+    """Trigger when this device is shared across many accounts."""
+    if input.device_shared_account_count is not None and input.device_shared_account_count >= DEVICE_SHARED_THRESHOLD:
+        return "device_shared_risk"
+    return None
+
+
+def account_flagged_risk(input: EngineInput) -> str | None:
+    """Trigger when user was bulk-flagged (e.g. fraud incident)."""
+    if getattr(input, "account_flagged", False):
+        return "account_flagged_risk"
+    return None
+
+
 # All detectors in order
 DETECTORS = [
     no_trade_fraud,
@@ -108,6 +148,10 @@ DETECTORS = [
     new_payment_method_risk,
     velocity_abuse,
     geo_vpn_anomaly,
+    card_decline_risk,
+    failed_login_risk,
+    device_shared_risk,
+    account_flagged_risk,
 ]
 
 

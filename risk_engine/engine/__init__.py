@@ -29,6 +29,10 @@ def _engine_input_to_dict(input: EngineInput) -> dict:
         "withdrawals_last_24h": input.withdrawals_last_24h,
         "deposits_last_1h": input.deposits_last_1h,
         "expected_country": input.expected_country,
+        "card_decline_count_24h": input.card_decline_count_24h,
+        "failed_login_count_24h": input.failed_login_count_24h,
+        "device_shared_account_count": input.device_shared_account_count,
+        "account_flagged": getattr(input, "account_flagged", False),
     }
 
 

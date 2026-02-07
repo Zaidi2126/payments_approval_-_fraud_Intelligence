@@ -15,10 +15,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 import os
 
-load_dotenv()
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Load .env from project root so it's always found regardless of cwd
+load_dotenv(BASE_DIR / ".env")
 
 
 # Quick-start development settings - unsuitable for production
@@ -30,7 +31,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "django-insecure-dev-key-change-in-producti
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DEBUG", "True").lower() in ("true", "1", "yes")
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split() or ["*"]
 
 
 # Application definition
@@ -81,13 +82,18 @@ WSGI_APPLICATION = "deriv_guard.wsgi.application"
 
 # Database
 # https://docs.djangoproject.com/en/4.2/ref/settings/#databases
-
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+# Use DATABASE_URL (e.g. from Render) if set; otherwise SQLite for local dev.
+_db_url = os.getenv("DATABASE_URL")
+if _db_url:
+    import dj_database_url
+    DATABASES = {"default": dj_database_url.parse(_db_url, conn_max_age=600)}
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3",
+        }
     }
-}
 
 
 # Password validation

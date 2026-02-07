@@ -11,6 +11,7 @@ from risk_engine.models import (
     HumanReview,
     FraudReadinessSnapshot,
     CalibrationStats,
+    SystemScore,
 )
 
 
@@ -119,14 +120,15 @@ def test_review_endpoint_creates_human_review():
     review_payload = {
         "risk_decision_id": risk_decision_id,
         "reviewer_id": "reviewer_1",
-        "final_decision": "approve",
+        "action": "accept",
     }
     response = client.post("/api/reviews", review_payload, format="json")
     assert response.status_code == 201
     data = response.json()
     assert "human_review_id" in data
     assert data["risk_decision_id"] == risk_decision_id
-    assert data["final_decision"] == "approve"
+    assert data["action"] == "accept"
+    assert data["final_decision"] == "approve"  # system approved, human accepted
     assert "reviewed_at" in data
 
     assert HumanReview.objects.filter(id=data["human_review_id"]).exists()
@@ -134,6 +136,144 @@ def test_review_endpoint_creates_human_review():
     assert str(hr.risk_decision_id) == risk_decision_id
     assert hr.reviewer_id == "reviewer_1"
     assert hr.final_decision == "approve"
+
+
+@pytest.mark.django_db
+def test_review_conflict_requires_note_and_final_decision():
+    """POST /api/reviews with action=conflict requires final_decision and non-empty note."""
+    client = APIClient()
+    dec = client.post(
+        "/api/payouts/decision",
+        {
+            "user_id": "u1",
+            "amount": 50,
+            "currency": "USD",
+            "payment_method_id": "pm1",
+            "payment_method_age_days": 2,
+            "country": "US",
+            "ip_address": "127.0.0.1",
+            "vpn_detected": False,
+            "total_trades": 0,
+            "total_trade_volume": 0,
+        },
+        format="json",
+    )
+    assert dec.status_code == 200
+    risk_decision_id = dec.json()["risk_decision_id"]
+    system_decision = dec.json()["decision"]
+
+    # conflict without note -> 400
+    r1 = client.post(
+        "/api/reviews",
+        {
+            "risk_decision_id": risk_decision_id,
+            "reviewer_id": "r1",
+            "action": "conflict",
+            "final_decision": "block" if system_decision == "approve" else "approve",
+        },
+        format="json",
+    )
+    assert r1.status_code == 400
+    assert "note" in r1.json()
+
+    # conflict with note -> 201
+    other = "block" if system_decision == "approve" else "approve"
+    r2 = client.post(
+        "/api/reviews",
+        {
+            "risk_decision_id": risk_decision_id,
+            "reviewer_id": "r1",
+            "action": "conflict",
+            "final_decision": other,
+            "note": "Because I am overturning.",
+        },
+        format="json",
+    )
+    assert r2.status_code == 201
+    assert r2.json()["action"] == "conflict"
+    assert r2.json()["final_decision"] == other
+    assert "Because I am overturning" in r2.json()["note"]
+
+
+@pytest.mark.django_db
+def test_review_explanation_and_resolve():
+    """GET review-explanation for decision=review; POST resolve with final_decision."""
+    from decimal import Decimal
+    client = APIClient()
+    pr = PayoutRequest.objects.create(
+        user_id="u_review",
+        amount=Decimal("100"),
+        currency="USD",
+        payment_method_id="pm1",
+        payment_method_age_days=5,
+        country="US",
+        ip_address="127.0.0.1",
+        vpn_detected=False,
+        total_trades=2,
+        total_trade_volume=Decimal("50"),
+    )
+    rd = RiskDecision.objects.create(
+        payout_request=pr,
+        risk_score=40,
+        decision="review",
+        confidence_score=50,
+        regret_level="low",
+        triggered_signals=["new_payment_method_risk"],
+        reasons=[],
+        counterfactuals=[],
+    )
+    # GET review-explanation (will generate and cache)
+    r1 = client.get(f"/api/decisions/{rd.id}/review-explanation")
+    assert r1.status_code == 200
+    assert "explanation" in r1.json()
+    assert len(r1.json()["explanation"]) > 0
+    rd.refresh_from_db()
+    assert rd.review_explanation
+
+    # POST resolve: human picks approve
+    r2 = client.post(
+        "/api/reviews",
+        {"risk_decision_id": str(rd.id), "action": "resolve", "final_decision": "approve"},
+        format="json",
+    )
+    assert r2.status_code == 201
+    assert r2.json()["action"] == "resolve"
+    assert r2.json()["final_decision"] == "approve"
+    assert HumanReview.objects.filter(risk_decision=rd).count() == 1
+
+
+@pytest.mark.django_db
+def test_system_score_increases_on_accept():
+    """Accepting a system decision increases system score."""
+    client = APIClient()
+    dec = client.post(
+        "/api/payouts/decision",
+        {
+            "user_id": "u1",
+            "amount": 100,
+            "currency": "USD",
+            "payment_method_id": "pm1",
+            "payment_method_age_days": 20,
+            "country": "US",
+            "ip_address": "127.0.0.1",
+            "vpn_detected": False,
+            "total_trades": 10,
+            "total_trade_volume": 1000,
+        },
+        format="json",
+    )
+    assert dec.status_code == 200
+    risk_decision_id = dec.json()["risk_decision_id"]
+    before = SystemScore.objects.filter(pk=1).first()
+    before_score = before.score if before else 0
+    r = client.post(
+        "/api/reviews",
+        {"risk_decision_id": risk_decision_id, "action": "accept"},
+        format="json",
+    )
+    assert r.status_code == 201
+    after = SystemScore.objects.get(pk=1)
+    assert after.score == before_score + 10
 
 
 @pytest.mark.django_db
@@ -249,7 +389,7 @@ def test_recompute_calibration_stats_command_creates_rows():
     risk_decision_id = dec.json()["risk_decision_id"]
     rev = client.post(
         "/api/reviews",
-        {"risk_decision_id": risk_decision_id, "reviewer_id": "r1", "final_decision": "approve"},
+        {"risk_decision_id": risk_decision_id, "reviewer_id": "r1", "action": "accept"},
         format="json",
     )
     assert rev.status_code == 201
@@ -353,13 +493,15 @@ def test_payout_history_endpoint_returns_rows():
         },
         format="json",
     )
-    # Add human review that overrides (e.g. system approved, human blocks)
+    # Add human review that overrides (system approved, human conflicts to block)
     rev = client.post(
         "/api/reviews",
         {
             "risk_decision_id": risk_decision_id_1,
             "reviewer_id": "r1",
+            "action": "conflict",
             "final_decision": "block",
+            "note": "Override: suspicious pattern.",
         },
         format="json",
     )

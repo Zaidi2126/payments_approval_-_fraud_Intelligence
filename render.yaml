@@ -1,0 +1,29 @@
+# Render Blueprint: one-click deploy of backend + free Postgres
+# Push this repo to GitHub, then: Render Dashboard → New → Blueprint → Connect repo → Apply
+# After first deploy, run the seed commands in the Shell (see DEPLOY.md).
+
+databases:
+  - name: deriv-guard-db
+    databaseName: deriv_guard
+    plan: free
+
+services:
+  - type: web
+    name: deriv-guard-api
+    runtime: python
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+    releaseCommand: python manage.py migrate
+    startCommand: gunicorn deriv_guard.wsgi:application --bind 0.0.0.0:$PORT
+
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: deriv-guard-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DEBUG
+        value: "False"
+      # Optional: add OPENAI_API_KEY, OPENAI_MODEL, SLACK_WEBHOOK_URL in Render dashboard after deploy

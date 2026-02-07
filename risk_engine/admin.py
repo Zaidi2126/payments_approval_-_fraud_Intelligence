@@ -6,6 +6,10 @@ from .models import (
     DailyMetrics,
     FraudReadinessSnapshot,
     CalibrationStats,
+    EngineConfig,
+    SystemScore,
+    AccountFlag,
+    EmergingPattern,
 )
 
 
@@ -28,10 +32,10 @@ class RiskDecisionAdmin(admin.ModelAdmin):
 
 @admin.register(HumanReview)
 class HumanReviewAdmin(admin.ModelAdmin):
-    list_display = ("id", "risk_decision", "reviewer_id", "final_decision", "reviewed_at")
-    list_filter = ("final_decision",)
-    search_fields = ("reviewer_id",)
-    readonly_fields = ("id", "reviewed_at")
+    list_display = ("id", "risk_decision", "reviewer_id", "final_decision", "approved_for_learning", "reviewed_at")
+    list_filter = ("final_decision", "approved_for_learning")
+    search_fields = ("reviewer_id", "note")
+    readonly_fields = ("id", "reviewed_at", "system_explanation")
     raw_id_fields = ("risk_decision",)
 
 
@@ -62,3 +66,27 @@ class CalibrationStatsAdmin(admin.ModelAdmin):
     )
     list_filter = ("date",)
     ordering = ("-date",)
+
+
+@admin.register(EngineConfig)
+class EngineConfigAdmin(admin.ModelAdmin):
+    list_display = ("key",)
+    search_fields = ("key",)
+
+
+@admin.register(SystemScore)
+class SystemScoreAdmin(admin.ModelAdmin):
+    list_display = ("id", "score", "updated_at")
+    readonly_fields = ("updated_at",)
+
+
+@admin.register(AccountFlag)
+class AccountFlagAdmin(admin.ModelAdmin):
+    list_display = ("user_id", "reason", "created_at")
+    search_fields = ("user_id",)
+
+
+@admin.register(EmergingPattern)
+class EmergingPatternAdmin(admin.ModelAdmin):
+    list_display = ("signal_combo", "case_count", "last_seen")
+    search_fields = ("signal_combo",)

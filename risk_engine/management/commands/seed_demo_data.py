@@ -1,15 +1,25 @@
 """
 Seed demo data: payout requests + risk decisions + human reviews.
 
-Ensures all 5 fraud patterns appear at least once per day. Then runs
-recompute_daily_metrics and recompute_calibration_stats.
+Use --clear to remove existing payout-related data first.
+Creates a curated dataset so you can easily check all decisions, signals, and features.
 
 Usage:
   python manage.py seed_demo_data
-  python manage.py seed_demo_data --days 3 --per_day 50 --reviews 0.2
+  python manage.py seed_demo_data --clear
+  python manage.py seed_demo_data --clear --reviews 0.3
+
+After seeding, you can check:
+  - Approve (low regret):  user_approve_low (amount 100), user_approve_medium (500)
+  - Review:                 user_review_velocity (velocity_abuse), user_review_two_signals (40)
+  - Block:                 user_block_multi (no_trade+velocity+geo), user_pattern_* (each pattern)
+  - Risk trajectory:       GET .../api/users/traj_user/risk-trajectory?days=7
+  - NL query:              POST .../api/query {"question": "accounts that traded minimally"} -> minimal_trader
+  - Fraud network:         GET .../api/fraud-network?user_id=network_user_pm_0 (pm_shared_1), network_user_dev_* (dev_shared_1)
+  - Emerging patterns:     GET .../api/patterns/emerging?days=7 (geo_vpn, velocity combos)
+  - Exposure:             GET .../api/exposure?user_ids=user_approve_low,minimal_trader&days=30
 """
 
-import random
 from datetime import datetime, time, timedelta
 from decimal import Decimal
 
@@ -17,36 +27,27 @@ from django.core.management import call_command
 from django.core.management.base import BaseCommand
 from django.utils import timezone
 
-from risk_engine.models import PayoutRequest, RiskDecision, HumanReview
-from risk_engine.engine import run_engine, EngineInput
+from risk_engine.models import (
+    PayoutRequest,
+    RiskDecision,
+    HumanReview,
+    DailyMetrics,
+    FraudReadinessSnapshot,
+    EmergingPattern,
+    AccountFlag,
+    CalibrationStats,
+)
+from risk_engine.engine import run_engine
+from risk_engine.engine.types import EngineInput
 from risk_engine.fraud_readiness import TOP_5_PATTERNS, build_scenario_input
 
-SEED = 42
-REVIEWERS = ["reviewer_1", "reviewer_2", "reviewer_3"]
-REVIEW_FLIP_PROBABILITY = 0.10  # 10% chance human flips vs system
-MIN_PER_PATTERN_PER_DAY = 2  # at least this many of each pattern per day
+REVIEWERS = ["reviewer_1", "reviewer_2"]
 
 
-def _base_input_for_day(day_index: int, request_index: int) -> EngineInput:
-    """Deterministic base payload for variety but reproducible."""
-    r = random.Random(SEED + day_index * 1000 + request_index)
-    amount = Decimal(str(round(r.uniform(50, 500), 2)))
-    return EngineInput(
-        user_id=f"demo_user_{day_index}_{request_index}",
-        amount=amount,
-        currency="USD",
-        payment_method_id=f"pm_demo_{request_index}",
-        payment_method_age_days=r.randint(0, 90),
-        country="US",
-        ip_address="192.168.1.1",
-        vpn_detected=False,
-        total_trades=r.randint(0, 50),
-        total_trade_volume=amount * Decimal(str(round(r.uniform(0.5, 2.0), 2))),
-        withdrawals_last_1h=r.randint(0, 2) if r.random() > 0.7 else 0,
-        withdrawals_last_24h=r.randint(0, 5) if r.random() > 0.8 else None,
-        deposits_last_1h=None,
-        expected_country="US",
-    )
+def _make_ts(days_ago: int):
+    """Created_at for today minus days_ago (12:00)."""
+    d = timezone.now().date() - timedelta(days=days_ago)
+    return timezone.make_aware(datetime.combine(d, time(12, 0, 0)))
 
 
 def _create_payout_and_decision(engine_input: EngineInput, created_at) -> RiskDecision:
@@ -63,6 +64,9 @@ def _create_payout_and_decision(engine_input: EngineInput, created_at) -> RiskDe
         vpn_detected=engine_input.vpn_detected,
         total_trades=engine_input.total_trades,
         total_trade_volume=engine_input.total_trade_volume,
+        card_decline_count_24h=getattr(engine_input, "card_decline_count_24h", None),
+        failed_login_count_24h=getattr(engine_input, "failed_login_count_24h", None),
+        device_id=getattr(engine_input, "device_id", "") or "",
     )
     payout.save()
     payout.created_at = created_at
@@ -84,21 +88,43 @@ def _create_payout_and_decision(engine_input: EngineInput, created_at) -> RiskDe
     return risk_decision
 
 
+def _base(user_id: str, amount: float, payment_method_id: str = "pm_1", payment_method_age_days: int = 30,
+          total_trades: int = 10, total_trade_volume: float = 5000, country: str = "US",
+          expected_country: str = "US", vpn: bool = False,
+          withdrawals_1h: int | None = 0, withdrawals_24h: int | None = 2, deposits_1h: int | None = 0,
+          card_decline: int | None = None, failed_login: int | None = None,
+          device_shared: int | None = None, device_id: str = "", account_flagged: bool = False,
+          ) -> EngineInput:
+    return EngineInput(
+        user_id=user_id,
+        amount=Decimal(str(amount)),
+        currency="USD",
+        payment_method_id=payment_method_id,
+        payment_method_age_days=payment_method_age_days,
+        country=country,
+        ip_address="192.168.1.1",
+        vpn_detected=vpn,
+        total_trades=total_trades,
+        total_trade_volume=Decimal(str(total_trade_volume)),
+        withdrawals_last_1h=withdrawals_1h,
+        withdrawals_last_24h=withdrawals_24h,
+        deposits_last_1h=deposits_1h,
+        expected_country=expected_country,
+        card_decline_count_24h=card_decline,
+        failed_login_count_24h=failed_login,
+        device_shared_account_count=device_shared,
+        account_flagged=account_flagged,
+    )
+
+
 class Command(BaseCommand):
-    help = "Seed demo data: payouts, decisions, and human reviews; then recompute metrics."
+    help = "Seed curated demo data for testing all decisions and features. Use --clear to wipe first."
 
     def add_arguments(self, parser):
         parser.add_argument(
-            "--days",
-            type=int,
-            default=3,
-            help="Number of days of data to create (default 3).",
-        )
-        parser.add_argument(
-            "--per_day",
-            type=int,
-            default=50,
-            help="Payout requests per day (default 50).",
+            "--clear",
+            action="store_true",
+            help="Delete existing payouts, decisions, reviews, metrics, snapshots, patterns, flags, calibration.",
         )
         parser.add_argument(
             "--reviews",
@@ -108,67 +134,114 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        days = max(1, options["days"])
-        per_day = max(1, options["per_day"])
-        reviews_ratio = max(0.0, min(1.0, options["reviews"]))
-        random.seed(SEED)
+        if options["clear"]:
+            self._clear()
+        self._seed(options.get("reviews", 0.2))
 
-        min_pattern = min(MIN_PER_PATTERN_PER_DAY, per_day // 5 or 1)
-        pattern_count = min_pattern * 5  # 5 patterns
-        random_count = max(0, per_day - pattern_count)
+    def _clear(self):
+        HumanReview.objects.all().delete()
+        RiskDecision.objects.all().delete()
+        PayoutRequest.objects.all().delete()
+        DailyMetrics.objects.all().delete()
+        FraudReadinessSnapshot.objects.all().delete()
+        EmergingPattern.objects.all().delete()
+        AccountFlag.objects.all().delete()
+        CalibrationStats.objects.all().delete()
+        self.stdout.write(self.style.WARNING("Cleared payouts, decisions, reviews, metrics, snapshots, patterns, flags, calibration."))
 
-        total_payouts = 0
-        total_reviews = 0
+    def _seed(self, reviews_ratio: float):
+        created = 0
+        # --- 1) Approve: low regret (amount 100), 0 signals ---
+        inp = _base("user_approve_low", 100, total_trades=20, total_trade_volume=2000)
+        _create_payout_and_decision(inp, _make_ts(0))
+        created += 1
 
-        for day in range(days):
-            base_date = timezone.now().date() - timedelta(days=day)
-            created_at = timezone.make_aware(
-                datetime.combine(base_date, time(12, 0, 0))
-            )
-            index_in_day = 0
+        # --- 2) Approve: medium regret (amount 500), 0 signals ---
+        inp = _base("user_approve_medium", 500, total_trades=15, total_trade_volume=8000)
+        _create_payout_and_decision(inp, _make_ts(0))
+        created += 1
 
-            # Ensure each of the 5 patterns triggers at least min_pattern times per day
-            for pattern in TOP_5_PATTERNS:
-                for k in range(min_pattern):
-                    base = _base_input_for_day(day, index_in_day)
-                    scenario_input = build_scenario_input(base, pattern)
-                    _create_payout_and_decision(scenario_input, created_at)
-                    total_payouts += 1
-                    index_in_day += 1
+        # --- 3) Review: one signal (velocity_abuse = 30) ---
+        inp = _base("user_review_velocity", 200, withdrawals_1h=5, withdrawals_24h=12, deposits_1h=6)
+        _create_payout_and_decision(inp, _make_ts(1))
+        created += 1
 
-            # Fill the rest with random/normal cases
-            for i in range(random_count):
-                base = _base_input_for_day(day, pattern_count + i)
-                _create_payout_and_decision(base, created_at)
-                total_payouts += 1
+        # --- 4) Review: two signals (new_payment_method 15 + short_trade 25 = 40) ---
+        inp = _base("user_review_two_signals", 300, payment_method_age_days=0, total_trades=1, total_trade_volume=0)
+        _create_payout_and_decision(inp, _make_ts(1))
+        created += 1
 
-        # Add human reviews for a fraction of approve/block decisions
-        decisions_for_review = list(
-            RiskDecision.objects.filter(decision__in=["approve", "block"]).order_by(
-                "created_at"
-            )
-        )
-        random.shuffle(decisions_for_review)
-        n_review = max(0, int(len(decisions_for_review) * reviews_ratio))
-        for rd in decisions_for_review[:n_review]:
-            reviewer_id = random.choice(REVIEWERS)
-            if random.random() < REVIEW_FLIP_PROBABILITY:
-                final_decision = "block" if rd.decision == "approve" else "approve"
-            else:
-                final_decision = rd.decision
+        # --- 5) Block: multiple signals (no_trade + velocity + geo) ---
+        inp = _base("user_block_multi", 1500, total_trades=0, total_trade_volume=0, payment_method_age_days=0,
+                   vpn=True, expected_country="XX", withdrawals_1h=5, withdrawals_24h=12, deposits_1h=6)
+        _create_payout_and_decision(inp, _make_ts(2))
+        created += 1
+
+        # --- 6) One per pattern (for variety and emerging patterns) ---
+        for i, pattern in enumerate(TOP_5_PATTERNS):
+            base = _base(f"user_pattern_{pattern}", 250 + i * 50, payment_method_age_days=0 if "payment" in pattern else 20,
+                        total_trades=0 if "no_trade" in pattern else 1 if "short" in pattern else 10,
+                        total_trade_volume=0 if "no_trade" in pattern or "short" in pattern else 3000,
+                        withdrawals_1h=5 if pattern == "velocity_abuse" else 0,
+                        withdrawals_24h=12 if pattern == "velocity_abuse" else 2,
+                        deposits_1h=6 if pattern == "velocity_abuse" else 0,
+                        vpn=pattern == "geo_vpn_anomaly", expected_country="XX" if pattern == "geo_vpn_anomaly" else "US")
+            inp = build_scenario_input(base, pattern)
+            _create_payout_and_decision(inp, _make_ts(i % 3))
+            created += 1
+
+        # --- 7) Extra block/review so emerging patterns have 3+ per combo (geo_vpn, velocity) ---
+        for i in range(2):
+            base = _base(f"user_geo_extra_{i}", 400, vpn=True, expected_country="XX")
+            inp = build_scenario_input(base, "geo_vpn_anomaly")
+            _create_payout_and_decision(inp, _make_ts(0))
+            created += 1
+        for i in range(2):
+            base = _base(f"user_velocity_extra_{i}", 350, withdrawals_1h=5, withdrawals_24h=12, deposits_1h=6)
+            inp = build_scenario_input(base, "velocity_abuse")
+            _create_payout_and_decision(inp, _make_ts(0))
+            created += 1
+
+        # --- 8) Risk trajectory user: same user_id, 4 payouts ---
+        for i in range(4):
+            amount = [100, 150, 200, 100][i]
+            dec = _base("traj_user", amount, total_trades=5 + i, total_trade_volume=1000 + 500 * i)
+            _create_payout_and_decision(dec, _make_ts(i))
+            created += 1
+
+        # --- 9) NL query "traded minimally / deposited but traded little": low trades, low volume, approved ---
+        inp = _base("minimal_trader", 100, total_trades=1, total_trade_volume=100, payment_method_age_days=5)
+        _create_payout_and_decision(inp, _make_ts(0))
+        created += 1
+
+        # --- 10) Fraud network: 3 users sharing same payment_method_id ---
+        for i in range(3):
+            inp = _base(f"network_user_pm_{i}", 200 + i * 100, payment_method_id="pm_shared_1")
+            _create_payout_and_decision(inp, _make_ts(i))
+            created += 1
+
+        # --- 11) Fraud network: 3 users sharing same device_id (set on PayoutRequest) ---
+        for i in range(3):
+            inp = _base(f"network_user_dev_{i}", 300, payment_method_id=f"pm_dev_{i}")
+            # EngineInput doesn't have device_id field for storage; we set it on PayoutRequest after
+            rd = _create_payout_and_decision(inp, _make_ts(i))
+            rd.payout_request.device_id = "dev_shared_1"
+            rd.payout_request.save(update_fields=["device_id"])
+            created += 1
+
+        # --- 12) Human reviews on a subset of approve/block ---
+        decisions = list(RiskDecision.objects.filter(decision__in=["approve", "block"]).order_by("created_at"))
+        import random
+        random.seed(42)
+        n_review = max(0, int(len(decisions) * reviews_ratio))
+        for rd in random.sample(decisions, min(n_review, len(decisions))):
             HumanReview.objects.create(
                 risk_decision=rd,
-                reviewer_id=reviewer_id,
-                final_decision=final_decision,
+                reviewer_id=random.choice(REVIEWERS),
+                final_decision=rd.decision,
             )
-            total_reviews += 1
 
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"Created {total_payouts} payout requests and {total_reviews} human reviews."
-            )
-        )
-
+        self.stdout.write(self.style.SUCCESS(f"Created {created} payout requests (+ human reviews)."))
         call_command("recompute_daily_metrics")
         call_command("recompute_calibration_stats")
         self.stdout.write(self.style.SUCCESS("Ran recompute_daily_metrics and recompute_calibration_stats."))

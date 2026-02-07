@@ -2,6 +2,7 @@
 Send daily payouts summary to Slack via incoming webhook.
 
 Requires SLACK_WEBHOOK_URL in environment (.env). If missing, exits with a message.
+Uses LLM to generate a detailed report when OPENAI_API_KEY is set.
 Usage: python manage.py send_daily_slack_summary
 """
 
@@ -11,12 +12,14 @@ from django.core.management.base import BaseCommand
 from dotenv import load_dotenv
 
 from risk_engine.models import DailyMetrics, CalibrationStats
+from risk_engine.report_context import get_daily_report_context_for_date
+from risk_engine.llm.client import generate_daily_report
 
 load_dotenv()
 
 
 class Command(BaseCommand):
-    help = "Post the latest daily metrics (and calibration if any) to Slack via webhook."
+    help = "Post the latest daily metrics and an LLM-generated detailed report to Slack via webhook."
 
     def handle(self, *args, **options):
         webhook_url = os.getenv("SLACK_WEBHOOK_URL")
@@ -46,11 +49,15 @@ class Command(BaseCommand):
             fields.append({"title": "Overconfidence rate %", "value": f"{calibration.overconfidence_rate}", "short": True})
             fields.append({"title": "Underconfidence rate %", "value": f"{calibration.underconfidence_rate}", "short": True})
 
+        context = get_daily_report_context_for_date(latest.date)
+        detailed_report = generate_daily_report(context)
+
         payload = {
             "attachments": [
                 {
                     "title": "Daily Payouts Summary",
                     "fields": fields,
+                    "text": detailed_report,
                     "color": "#36a64f",
                 }
             ]
@@ -58,7 +65,7 @@ class Command(BaseCommand):
 
         try:
             import requests
-            resp = requests.post(webhook_url, json=payload, timeout=10)
+            resp = requests.post(webhook_url, json=payload, timeout=30)
             resp.raise_for_status()
             self.stdout.write(self.style.SUCCESS("Slack summary sent."))
         except Exception as e:

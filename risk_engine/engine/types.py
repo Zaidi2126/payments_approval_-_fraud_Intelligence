@@ -39,6 +39,12 @@ class EngineInput:
     # Optional geo context for mismatch check
     expected_country: Optional[str] = None
 
+    # Optional technical fraud signals
+    card_decline_count_24h: Optional[int] = None
+    failed_login_count_24h: Optional[int] = None
+    device_shared_account_count: Optional[int] = None  # how many accounts share this device_id
+    account_flagged: bool = False  # user was bulk-flagged (e.g. fraud incident)
+
 
 @dataclass
 class EngineResult:
