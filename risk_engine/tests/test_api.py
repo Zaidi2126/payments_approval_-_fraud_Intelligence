@@ -1,11 +1,11 @@
 """
-API tests for payout decision, human review, and metrics endpoints.
+API tests for payout decision, human review, metrics, risk trajectory, fraud readiness.
 """
 
 import pytest
 from rest_framework.test import APIClient
 
-from risk_engine.models import PayoutRequest, RiskDecision, HumanReview
+from risk_engine.models import PayoutRequest, RiskDecision, HumanReview, FraudReadinessSnapshot
 
 
 @pytest.mark.django_db
@@ -86,3 +86,89 @@ def test_review_endpoint_creates_human_review():
     assert str(hr.risk_decision_id) == risk_decision_id
     assert hr.reviewer_id == "reviewer_1"
     assert hr.final_decision == "approve"
+
+
+@pytest.mark.django_db
+def test_risk_trajectory_endpoint():
+    """GET /api/users/<user_id>/risk-trajectory returns points, trend, momentum, summary."""
+    client = APIClient()
+    # Create two decisions for same user to get a trajectory
+    for _ in range(2):
+        client.post(
+            "/api/payouts/decision",
+            {
+                "user_id": "traj_user",
+                "amount": 100,
+                "currency": "USD",
+                "payment_method_id": "pm_1",
+                "payment_method_age_days": 10,
+                "country": "US",
+                "ip_address": "192.168.1.1",
+                "vpn_detected": False,
+                "total_trades": 5,
+                "total_trade_volume": 500,
+            },
+            format="json",
+        )
+    response = client.get("/api/users/traj_user/risk-trajectory?days=7")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["user_id"] == "traj_user"
+    assert data["window_days"] == 7
+    assert "points" in data
+    assert len(data["points"]) >= 2
+    for pt in data["points"]:
+        assert "ts" in pt
+        assert "risk_score" in pt
+        assert "decision" in pt
+    assert data["trend"] in ("rising", "falling", "flat")
+    assert -100 <= data["momentum"] <= 100
+    assert "summary" in data and "trend" in data["summary"].lower()
+
+    # No data for unknown user
+    empty = client.get("/api/users/nonexistent_user_xyz/risk-trajectory?days=7")
+    assert empty.status_code == 200
+    assert empty.json()["points"] == []
+    assert empty.json()["trend"] == "flat"
+    assert empty.json()["momentum"] == 0
+
+
+@pytest.mark.django_db
+def test_fraud_readiness_simulation_creates_snapshots():
+    """POST /api/fraud-readiness/simulate runs scenarios and creates FraudReadinessSnapshot rows."""
+    initial_count = FraudReadinessSnapshot.objects.count()
+    client = APIClient()
+    payload = {
+        "user_id": "sim_user",
+        "amount": 200,
+        "currency": "USD",
+        "payment_method_id": "pm_sim",
+        "payment_method_age_days": 5,
+        "country": "US",
+        "ip_address": "10.0.0.1",
+        "vpn_detected": False,
+        "total_trades": 10,
+        "total_trade_volume": 1000,
+    }
+    response = client.post("/api/fraud-readiness/simulate", payload, format="json")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["base_user_id"] == "sim_user"
+    assert "results" in data
+    assert len(data["results"]) == 5  # all top 5 patterns by default
+    for r in data["results"]:
+        assert "simulated_pattern" in r
+        assert "simulated_risk_score" in r
+        assert "readiness_level" in r
+        assert r["readiness_level"] in ("low", "medium", "high")
+        assert "decision" in r
+        assert "triggered_signals" in r
+        assert "reasons" in r
+    assert FraudReadinessSnapshot.objects.count() == initial_count + 5
+
+    # With specific scenarios
+    payload["scenarios"] = ["no_trade_fraud", "geo_vpn_anomaly"]
+    resp2 = client.post("/api/fraud-readiness/simulate", payload, format="json")
+    assert resp2.status_code == 200
+    assert len(resp2.json()["results"]) == 2
+    assert FraudReadinessSnapshot.objects.count() == initial_count + 5 + 2
