@@ -209,11 +209,50 @@ class Command(BaseCommand):
             _create_payout_and_decision(dec, _make_ts(i))
             created += 1
 
-        # --- 8b) demo_user_1: 15 payouts for a rich Risk Trajectory demo (frontend often uses this id) ---
+        # --- 8b) demo_user_1: 15 payouts with RISING RISK (fraud tendency) for trajectory chart demo ---
+        # Oldest first: start clean (approve), then new_payment_method -> velocity -> short_trade -> no_trade -> multi-signal block
         amounts = [80, 150.50, 220, 120, 300, 95, 410, 180, 250, 110, 320, 200, 140, 380, 160]
+        # Scenario per payout (oldest = index 0): "clean" | pattern name. Builds rising risk over time.
+        demo_scenarios = [
+            "clean", "clean", "clean",                             # 0 (approve)
+            "new_payment_method_risk", "new_payment_method_risk",  # 15 (review)
+            "velocity_abuse", "velocity_abuse", "velocity_abuse",  # 30 (review)
+            "short_trade_abuse",                                    # 25 (review)
+            "no_trade_fraud", "no_trade_fraud",                   # 40 (block)
+            "no_trade_fraud", "no_trade_fraud", "no_trade_fraud",  # 40+ then 70, 65, 95 (block) - custom below
+            "account_flagged_risk",                                 # 100 (block)
+        ]
         for i in range(15):
-            dec = _base("demo_user_1", amounts[i], total_trades=3 + i, total_trade_volume=800 + 400 * i)
-            _create_payout_and_decision(dec, _make_ts(min(i, 13)))  # spread over ~14 days so all in 30-day window
+            day_ago = 14 - i  # oldest = 14 days ago, newest = today
+            amt = amounts[i]
+            if demo_scenarios[i] == "clean":
+                inp = _base("demo_user_1", amt, total_trades=10 + i, total_trade_volume=2000 + 500 * i)
+            elif demo_scenarios[i] == "no_trade_fraud" and i in (10, 11):
+                # Multi-signal: no_trade + velocity (i=10), no_trade + geo (i=11)
+                base = _base("demo_user_1", amt, total_trades=0, total_trade_volume=0, payment_method_age_days=0)
+                if i == 10:
+                    base = _base("demo_user_1", amt, total_trades=0, total_trade_volume=0, payment_method_age_days=0,
+                                 withdrawals_1h=5, withdrawals_24h=12, deposits_1h=6)
+                else:  # i == 11
+                    base = _base("demo_user_1", amt, total_trades=0, total_trade_volume=0, payment_method_age_days=0,
+                                 vpn=True, expected_country="XX")
+                inp = build_scenario_input(base, "no_trade_fraud")
+            elif demo_scenarios[i] == "no_trade_fraud" and i == 12:
+                # no_trade + velocity + geo = 40+30+25 = 95 block
+                base = _base("demo_user_1", amt, total_trades=0, total_trade_volume=0, payment_method_age_days=0,
+                             vpn=True, expected_country="XX", withdrawals_1h=5, withdrawals_24h=12, deposits_1h=6)
+                inp = build_scenario_input(base, "no_trade_fraud")
+            else:
+                base = _base("demo_user_1", amt, payment_method_age_days=0 if "payment" in demo_scenarios[i] else 30,
+                             total_trades=0 if "no_trade" in demo_scenarios[i] else 1 if "short" in demo_scenarios[i] else 10,
+                             total_trade_volume=0 if "no_trade" in demo_scenarios[i] or "short" in demo_scenarios[i] else 3000,
+                             withdrawals_1h=5 if demo_scenarios[i] == "velocity_abuse" else 0,
+                             withdrawals_24h=12 if demo_scenarios[i] == "velocity_abuse" else 2,
+                             deposits_1h=6 if demo_scenarios[i] == "velocity_abuse" else 0,
+                             vpn=demo_scenarios[i] == "geo_vpn_anomaly",
+                             expected_country="XX" if demo_scenarios[i] == "geo_vpn_anomaly" else "US")
+                inp = build_scenario_input(base, demo_scenarios[i])
+            _create_payout_and_decision(inp, _make_ts(day_ago))
             created += 1
 
         # --- 9) NL query "traded minimally / deposited but traded little": low trades, low volume, approved ---
